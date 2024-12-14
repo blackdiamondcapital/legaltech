@@ -1,0 +1,132 @@
+import requests
+import pandas as pd
+import time
+from tqdm import tqdm
+import logging
+import os
+
+# 設定日誌
+logging.basicConfig(
+    filename='courtlistener_api_crawler.log',
+    filemode='a',
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
+# 定義 API 端點和參數
+BASE_URL = "https://www.courtlistener.com/api/rest/v3/search/"
+HEADERS = {
+    "Accept": "application/json",
+    "Authorization": "Token YOUR_API_KEY"  # 替換為您的 API 金鑰
+}
+
+# 定義搜尋參數
+params = {
+    "type": "o/case",        # 搜尋類型為案件
+    "page_size": 100,        # 每頁取得 100 筆資料（最大值）
+    # "query": "contract",    # 可選的搜尋查詢，例如 "contract"
+    # "jurisdiction": "federal",  # 可選的司法管轄區，例如 "federal"
+}
+
+# 定義輸出檔案
+OUTPUT_CSV = "courtlistener_cases_api.csv"
+
+# 定義進度保存檔案
+PROGRESS_FILE = "courtlistener_api_crawler_progress.txt"
+
+# 初始化變數
+all_cases = []
+next_url = BASE_URL
+
+# 檢查是否有進度保存
+if os.path.exists(PROGRESS_FILE):
+    with open(PROGRESS_FILE, 'r') as f:
+        next_url = f.read().strip()
+    logging.info(f"從 URL {next_url} 繼續抓取")
+    print(f"從 URL {next_url} 繼續抓取")
+else:
+    logging.info("開始新的抓取會話")
+    print("開始新的抓取會話")
+
+# 使用 tqdm 顯示進度條
+with tqdm(desc="抓取頁面", unit="頁") as pbar:
+    while next_url:
+        try:
+            response = requests.get(next_url, headers=HEADERS, params=params, timeout=10)
+            if response.status_code != 200:
+                logging.error(f"抓取 URL {next_url} 失敗：狀態碼 {response.status_code}")
+                print(f"抓取 URL {next_url} 失敗：狀態碼 {response.status_code}")
+                break
+
+            data = response.json()
+            results = data.get('results', [])
+
+            if not results:
+                logging.info(f"在 URL {next_url} 上未找到更多案件。")
+                print(f"在 URL {next_url} 上未找到更多案件。")
+                break
+
+            for case in results:
+                case_info = {
+                    "id": case.get("id"),
+                    "name": case.get("name"),
+                    "decision_date": case.get("decision_date"),
+                    "jurisdiction": case.get("jurisdiction", {}).get("name"),
+                    "court": case.get("court", {}).get("name"),
+                    "summary": case.get("summary"),
+                    "url": case.get("absolute_url")
+                }
+                all_cases.append(case_info)
+
+            logging.info(f"從 URL {next_url} 抓取到 {len(results)} 筆案件。")
+            print(f"從 URL {next_url} 抓取到 {len(results)} 筆案件。")
+
+            # 更新進度條
+            pbar.update(1)
+
+            # 保存進度（下一頁的 URL）
+            next_url = data.get('next')
+            if next_url:
+                with open(PROGRESS_FILE, 'w') as f:
+                    f.write(next_url)
+            else:
+                logging.info("已完成所有頁面的抓取。")
+                print("已完成所有頁面的抓取。")
+
+            # 遵守速率限制
+            time.sleep(1)  # 每秒一次請求
+
+        except requests.exceptions.RequestException as e:
+            logging.error(f"請求 URL {next_url} 失敗：{e}")
+            print(f"請求 URL {next_url} 失敗：{e}")
+            time.sleep(5)  # 延遲後重試
+            continue
+        except ValueError as e:
+            logging.error(f"解析 JSON 失敗於 URL {next_url}：{e}")
+            print(f"解析 JSON 失敗於 URL {next_url}：{e}")
+            time.sleep(5)
+            continue
+
+# 將資料轉換為 DataFrame
+df = pd.DataFrame(all_cases)
+
+# 如果已存在輸出檔案，則追加資料並去重
+if os.path.exists(OUTPUT_CSV):
+    df_existing = pd.read_csv(OUTPUT_CSV)
+    df = pd.concat([df_existing, df], ignore_index=True)
+    df.drop_duplicates(subset=['url'], inplace=True)
+    logging.info(f"追加新案件至已存在的 {OUTPUT_CSV}。總案件數：{len(df)}。")
+    print(f"追加新案件至已存在的 {OUTPUT_CSV}。總案件數：{len(df)}。")
+else:
+    logging.info(f"創建新的 CSV 檔案 {OUTPUT_CSV}，包含 {len(df)} 筆案件。")
+    print(f"創建新的 CSV 檔案 {OUTPUT_CSV}，包含 {len(df)} 筆案件。")
+
+# 儲存為 CSV
+df.to_csv(OUTPUT_CSV, index=False, encoding='utf-8-sig')
+print(f"總共抓取到 {len(all_cases)} 筆案件。")
+logging.info(f"總共抓取到 {len(all_cases)} 筆案件。")
+
+# 移除進度檔案
+if os.path.exists(PROGRESS_FILE):
+    os.remove(PROGRESS_FILE)
+    logging.info("移除進度檔案。")
